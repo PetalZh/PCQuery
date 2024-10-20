@@ -1,0 +1,2 @@
+result = {}
+gt_list = []
