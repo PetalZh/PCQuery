@@ -50,7 +50,7 @@ class SeparateHead(nn.Module):
 
         return ret_dict
 
-class CounterHeadPartitionOverlap(nn.Module):
+class CounterHeadPartitionOverlapWaymo(nn.Module):
     def __init__(self, model_cfg, input_channels, num_class, class_names, grid_size, point_cloud_range, voxel_size,
                  predict_boxes_when_training=True):
         super().__init__()
@@ -136,15 +136,10 @@ class CounterHeadPartitionOverlap(nn.Module):
         center_int = center.int()
         center_int_float = center_int.float()
 
-        # print('center int: ')
-        # print(center_int)
-
         dx, dy, dz = gt_boxes[:, 3], gt_boxes[:, 4], gt_boxes[:, 5]
         dx = dx / self.voxel_size[0] / feature_map_stride
         dy = dy / self.voxel_size[1] / feature_map_stride
 
-        # print('dx: {}, dy: {}, '.format(dx, dy))
-        # print('point cloud range: {}'.format(self.point_cloud_range))
 
         radius = centernet_utils.gaussian_radius(dx, dy, min_overlap=gaussian_overlap)
         radius = torch.clamp_min(radius.int(), min=min_radius)
@@ -177,11 +172,6 @@ class CounterHeadPartitionOverlap(nn.Module):
         mask_list = torch.stack(mask_list)
         inds_list = torch.stack(inds_list)
         heatmap_list = torch.stack(heatmap_list)
-
-        # print('heatmap list: ')
-        # for item in heatmap_list:
-        #     print(len(item))
-        # print(heatmap_list[0])
 
         return heatmap_list, ret_boxes, inds_list, mask_list, ret_boxes_src
 
@@ -434,10 +424,8 @@ class CounterHeadPartitionOverlap(nn.Module):
         # expanding = math.floor(64 * expanding_rate)
         expanding = math.floor(94 * expanding_rate)
 
-
-        # x_start, x_end, y_start, y_end
-        # for nuscenes
-        ranges = [[0, 64+expanding, 0, 64+expanding],[0, 64+expanding, 64-expanding, 128],[64-expanding, 128, 0, 64+expanding],[64-expanding, 128, 64-expanding, 128]]
+        # for waymo
+        ranges = [[0, 94+expanding, 0, 94+expanding],[0, 94+expanding, 94-expanding, 188],[94-expanding, 188, 0, 94+expanding],[94-expanding, 188, 94-expanding, 188]]
 
         pred_dicts = []
         # # print(self.heads_list)
@@ -465,11 +453,12 @@ class CounterHeadPartitionOverlap(nn.Module):
                 feature_map_stride=data_dict.get('spatial_features_2d_strides', None)
             )
 
-            objects = ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+            # objects = ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+             # waymo
+            objects = ['Vehicle', 'Pedestrian', 'Cyclist']
 
             for idx, pred_dict in enumerate(pred_dicts):
                 # pred_dict['hm'] #self.sigmoid(pred_dict['hm'])
-
                 hm_list = []
                 gt_list = []
                 for i in range(len(pred_dict)):
@@ -496,7 +485,6 @@ class CounterHeadPartitionOverlap(nn.Module):
                 file = 'path_to_save/{}.txt'.format(self.progress)
                 with open(file, 'w') as f:
                     json.dump(hm_list, f)
-
 
                 self.progress += 1
 

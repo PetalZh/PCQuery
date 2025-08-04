@@ -9,7 +9,7 @@ from ..model_utils import centernet_utils
 from ...utils import loss_utils
 from functools import partial
 from ...constants import result, gt_list
-import json
+import json, math
 
 
 class SeparateHead(nn.Module):
@@ -130,12 +130,12 @@ class CounterHeadPartition(nn.Module):
         x, y, z = gt_boxes[:, 0], gt_boxes[:, 1], gt_boxes[:, 2]
         coord_x = (x - self.point_cloud_range[0]) / self.voxel_size[0] / feature_map_stride
         coord_y = (y - self.point_cloud_range[1]) / self.voxel_size[1] / feature_map_stride
-        coord_x = torch.clamp(coord_x, min=0, max=feature_map_size[0] - 0.5)  # bugfixed: 1e-6 does not work for center.int()
-        coord_y = torch.clamp(coord_y, min=0, max=feature_map_size[1] - 0.5)  #
+        coord_x = torch.clamp(coord_x, min=0, max=feature_map_size[0] - 0.5)
+        coord_y = torch.clamp(coord_y, min=0, max=feature_map_size[1] - 0.5)
         center = torch.cat((coord_x[:, None], coord_y[:, None]), dim=-1)
         center_int = center.int()
         center_int_float = center_int.float()
-        
+
         # print('center int: ')
         # print(center_int)
 
@@ -280,8 +280,8 @@ class CounterHeadPartition(nn.Module):
             # (batch_size, partition_num)
             weight = torch.full((batch_size, len(partitions)), 0.25, device='cuda', dtype=torch.float32)
             count_loss_l1 = torch.full((batch_size, len(partitions)), 0, device='cuda', dtype=torch.float32)
-            
-            
+
+
             for i in range(batch_size):
                 total_obj.append(torch.sum(target_dicts['masks'][idx][i, :, :]).to('cuda'))
 
@@ -292,24 +292,24 @@ class CounterHeadPartition(nn.Module):
                 par = partitions[i]
 
                 center_count, centers = self.extract_centers(pred_dict[i]['hm'], threshold=0.6)
-                
+
                 for j in range(batch_size):
                     gt_count = torch.sum(target_dicts['masks'][idx][j, i, :])
                     if total_obj[j] != 0:
                         weight[j, i] += gt_count/total_obj[j]
                     count_loss_l1[j, i] = torch.abs(center_count[j] - gt_count)
-                
+
                 hm_loss = self.hm_loss_func(hm, target_dicts['heatmaps'][idx][:, i, :, par[0]:par[1], par[2]:par[3]])
                 hm_loss *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['cls_weight']
                 head_hm_loss += hm_loss
 
             # print(count_loss_l1)
-            head_count_loss = torch.sum(weight * count_loss_l1)   
+            head_count_loss = torch.sum(weight * count_loss_l1)
 
             loss += head_hm_loss + head_count_loss
             tb_dict['hm_loss_head_%d' % idx] = head_hm_loss.item() + head_count_loss.item()
         return loss, tb_dict
-    
+
     def extract_centers(self, heatmap, threshold=0.5, radius=2):
         """
         Extract centers from the heatmap.
@@ -344,7 +344,7 @@ class CounterHeadPartition(nn.Module):
 
                 for i in range(len(y_idx)):
                     batch_centers.append((x_idx[i].item(), y_idx[i].item()))
-            
+
             all_centers.append(batch_centers)
 
         # Convert list of centers to tensor
@@ -354,11 +354,11 @@ class CounterHeadPartition(nn.Module):
         for i, centers in enumerate(centers_tensor):
             if len(centers) > 0:
                 padded_centers[i, :len(centers), :] = centers
-        
+
         num_centers = torch.tensor([len(centers) for centers in all_centers], dtype=torch.float32, device=device)
-        
+
         return num_centers, padded_centers
-    
+
     def generate_predicted_boxes(self, batch_size, pred_dicts):
         post_process_cfg = self.model_cfg.POST_PROCESSING
         post_center_limit_range = torch.tensor(post_process_cfg.POST_CENTER_LIMIT_RANGE).cuda().float()
@@ -436,21 +436,21 @@ class CounterHeadPartition(nn.Module):
         x = self.shared_conv(spatial_features_2d)
         # print(x.shape)
 
+        # for nuscenes
         x1 = x[:, :, :64, :64]
         x2 = x[:, :, :64, 64:128]
         x3 = x[:, :, 64:128, :64]
         x4 = x[:, :, 64:128, 64:128]
 
-        # x_start, x_end, y_start, y_end
+        # # x_start, x_end, y_start, y_end
         ranges = [[0, 64, 0, 64],[0, 64, 64, 128],[64, 128, 0, 64],[64, 128, 64, 128]]
 
-
         pred_dicts = []
-        # print(self.heads_list)
+
         for head in self.heads_list:
             head_output= [head(x1), head(x2), head(x3), head(x4)]
             pred_dicts.append(head_output)
-            
+
         if self.training:
             target_dict = self.assign_targets(
                 ranges, data_dict['gt_boxes'], feature_map_size=spatial_features_2d.size()[2:],
@@ -468,7 +468,7 @@ class CounterHeadPartition(nn.Module):
                 ranges, data_dict['gt_boxes'], feature_map_size=spatial_features_2d.size()[2:],
                 feature_map_stride=data_dict.get('spatial_features_2d_strides', None)
             )
-
+            # nuscenes
             objects = ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
 
             for idx, pred_dict in enumerate(pred_dicts):
@@ -483,7 +483,7 @@ class CounterHeadPartition(nn.Module):
                     hm_list.append(self.sigmoid(hm).tolist())
                     gt_list.append(torch.sum(mask).item())
 
-                    print(hm.shape)
+                    # print(hm.shape)
 
                 obj = objects[idx]
                 data_dict['gt_count'] = 0#gt_count
@@ -497,14 +497,11 @@ class CounterHeadPartition(nn.Module):
                 else:
                     result[obj] = {'gt_count': [0], 'center_count': [0]} # gt_count.item(), center_count.item()
 
-                # file = '/data/hms_partition_ep10/{}.txt'.format(self.progress)
-                # with open(file, 'w') as f: 
-                #     json.dump(hm_list, f)
+                file = 'path_to_save/{}.txt'.format(self.progress)
+                with open(file, 'w') as f:
+                    json.dump(hm_list, f)
 
-                # file = '/data/hms_partition_ep10/gt_{}.txt'.format(self.progress)
-                # with open(file, 'w') as f: 
-                #     json.dump(gt_list, f)
-                
+
                 self.progress += 1
 
         return data_dict

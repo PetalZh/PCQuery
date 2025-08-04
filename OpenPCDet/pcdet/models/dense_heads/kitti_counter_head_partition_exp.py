@@ -1,4 +1,4 @@
-import torch 
+import torch
 import numpy as np
 import torch.nn as nn
 from ...utils import box_coder_utils, common_utils, loss_utils
@@ -38,7 +38,7 @@ class CounterHeadKittiExp(nn.Module):
 
         target_cfg = self.model_cfg.TARGET_ASSIGNER_CONFIG
 
-        self.target_cfg = target_cfg 
+        self.target_cfg = target_cfg
         self.grid_size = grid_size
         self.point_cloud_range = point_cloud_range
         self.progress = 0
@@ -58,10 +58,16 @@ class CounterHeadKittiExp(nn.Module):
 
         self.init_weights()
 
-        expanding_rate = 0.3
-        expanding = 0#math.floor(64 * expanding_rate)
+        expanding_rate = 0.2
+        expanding = math.floor(200 * expanding_rate)
         # # x_start, x_end, y_start, y_end
-        self.ranges = [[0, 64+expanding, 0, 64+expanding],[0, 64+expanding, 64-expanding, 128],[64-expanding, 128, 0, 64+expanding],[64-expanding, 128, 64-expanding, 128]]
+        # self.ranges = [[0, 200, 0, 176],[0, 200, 176, 352],[200, 400, 0, 176],[200, 400, 176, 352]]
+        # self.ranges = [[0, 200+expanding, 0, 176+expanding],[0, 200+expanding, 176-expanding, 352],[200-expanding, 400, 0, 176+expanding],[200-expanding, 400, 176-expanding, 352]]
+
+        # self.ranges = [[0, 200+expanding, 0, 352],[200-expanding, 400, 0, 352]]
+
+        self.ranges = [[0, 130+expanding, 0, 115+expanding], [130-expanding, 260+expanding, 0, 115+expanding], [260-expanding, 400, 0, 115+expanding], [0, 130+expanding, 115-expanding, 230+expanding], [130-expanding, 260+expanding, 115-expanding, 230+expanding], [260-expanding, 400, 115-expanding, 230+expanding], [0, 130+expanding, 230-expanding, 352], [130-expanding, 260+expanding, 230-expanding, 352], [260-expanding, 400, 230-expanding, 352]]
+        # self.ranges = [[0, 130, 0, 115], [130, 260, 0, 115], [260, 400, 0, 115], [0, 130, 115, 230], [130, 260, 115, 230], [260, 400, 115, 230], [0, 130, 230, 352], [130, 260, 230, 352], [260, 400, 230, 352]]
 
     def init_weights(self):
         pi = 0.01
@@ -70,20 +76,11 @@ class CounterHeadKittiExp(nn.Module):
 
     def forward(self, data_dict):
         spatial_features_2d = data_dict['spatial_features_2d']
-        # print('spatial feature 2d: {}'.format(spatial_features_2d.shape))
-
-        # expanding_rate = 0.3
-        # expanding = 0#math.floor(64 * expanding_rate)
-        # # # x_start, x_end, y_start, y_end
-        # ranges = [[0, 64+expanding, 0, 64+expanding],[0, 64+expanding, 64-expanding, 128],[64-expanding, 128, 0, 64+expanding],[64-expanding, 128, 64-expanding, 128]]
 
         cls_pred_list = []
-        # # print(self.heads_list)
-        # for head in self.heads_list:
-        #     head_output= []
         for coor_range in self.ranges:
-            cls_pred_list.append(self.conv_cls(spatial_features_2d[:, :, coor_range[0]:coor_range[1], coor_range[2]:coor_range[3]]))
-        # pred_dicts.append(head_output)
+            cls_preds_partation = self.conv_cls(spatial_features_2d[:, :, coor_range[0]:coor_range[1], coor_range[2]:coor_range[3]])
+            cls_pred_list.append(cls_preds_partation.permute(0, 2, 3, 1).contiguous())
 
         # cls_preds = self.conv_cls(spatial_features_2d)
         box_preds = self.conv_box(spatial_features_2d)
@@ -102,28 +99,27 @@ class CounterHeadKittiExp(nn.Module):
 
         if not self.training or self.predict_boxes_when_training:
             hm_list = []
-            pred_dicts = self.forward_ret_dict['cls_preds']
+            pred_dicts_list = self.forward_ret_dict['cls_preds']
 
-            # print(pred_dicts.shape)
-            for i in range(pred_dicts.shape[-1]):
-                batch_hm = pred_dicts[..., i]
-                # print(batch_hm.shape)
-                hm_list.append(batch_hm.tolist())
+            # print(pred_dicts_list[0].shape)
+            for i in range(pred_dicts_list[0].size(-1)):
+                hm_list = []
+                for pred_dicts in pred_dicts_list:
+                    pred_heatmap = pred_dicts[:, :, :, i]
+                    hm_list.append(pred_heatmap.tolist())
+                # print('pred heatmap shape: ')
+                # print(pred_heatmap)
 
-            file = '/data/kitti_hm/{}.txt'.format(self.progress)
-            with open(file, 'w') as f: 
-                json.dump(hm_list, f)
-            self.progress += 1
+                hm_list.append(pred_heatmap.tolist())
 
-            
-            batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
-                batch_size=data_dict['batch_size'],
-                cls_preds=cls_preds, box_preds=box_preds, dir_cls_preds=None
-            )
+                file = 'save_to_path/{}.txt'.format(self.progress)
+                with open(file, 'w') as f:
+                    json.dump(hm_list, f)
+                self.progress += 1
 
-            
-            data_dict['batch_cls_preds'] = batch_cls_preds
-            data_dict['batch_box_preds'] = batch_box_preds
+
+            data_dict['batch_cls_preds'] = torch.zeros(4, 140800, 3, device='cuda')#batch_cls_preds
+            data_dict['batch_box_preds'] = torch.zeros(4, 140800, 7, device='cuda')#batch_box_preds
             data_dict['cls_preds_normalized'] = False
 
         return data_dict
@@ -157,7 +153,7 @@ class CounterHeadKittiExp(nn.Module):
         """Generate targets.
 
         Args:
-            gt_boxes: (B, M, 8) box + cls 
+            gt_boxes: (B, M, 8) box + cls
 
         Returns:
             Returns:
@@ -176,43 +172,14 @@ class CounterHeadKittiExp(nn.Module):
         partial_func = partial(self.get_targets_single, partitions=ranges)
         heatmaps, anno_boxes, inds, masks = multi_apply(
             partial_func, gt_bboxes_3d, gt_labels_3d)
-        # heatmaps, anno_boxes, inds, masks = multi_apply(
-        #     self.get_targets_single, gt_bboxes_3d, gt_labels_3d)
-        # heatmaps, anno_boxes, inds, masks = self.get_targets_single(ranges, gt_bboxes_3d, gt_labels_3d)
-        # transpose heatmaps, because the dimension of tensors in each task is
-        # different, we have to use numpy instead of torch to do the transpose.
-        # heatmaps = np.array(heatmaps).transpose(1, 0).tolist()
 
-        if type(heatmaps) != list:
-            heatmaps = heatmaps.cpu().numpy().transpose(1, 0).tolist()
-        print('aaaaaaaaaaa')
-        print(len(heatmaps[0][0]))
-        heatmaps = [torch.stack(hms_) for hms_ in heatmaps]
-        # transpose anno_boxes
-        if type(anno_boxes) != list:
-            anno_boxes = anno_boxes.cpu().numpy().transpose(1, 0).tolist()
-            # anno_boxes = np.array(anno_boxes).transpose(1, 0).tolist()
-        anno_boxes = [torch.stack(anno_boxes_) for anno_boxes_ in anno_boxes]
-        # transpose inds
-        if type(inds) != list:
-            inds = inds.cpu().numpy().transpose(1, 0).tolist()
-        # inds = np.array(inds).transpose(1, 0).tolist()
-        inds = [torch.stack(inds_) for inds_ in inds]
-
-        # transpose inds
-        if type(masks) != list:
-            masks = masks.cpu().numpy().transpose(1, 0).tolist()
-        # masks = np.array(masks).transpose(1, 0).tolist()
-        masks = [torch.stack(masks_) for masks_ in masks]
-
-        
         all_targets_dict = {
             'heatmaps': heatmaps,
             'anno_boxes': anno_boxes,
             'inds': inds,
             'masks': masks
         }
-        
+
         return all_targets_dict
 
     def get_targets_single(self, gt_bboxes_3d, gt_labels_3d, partitions):
@@ -292,37 +259,37 @@ class CounterHeadKittiExp(nn.Module):
 
             num_objs = min(task_boxes[idx].shape[0], max_objs)
 
-            for k in range(num_objs):
-                cls_id = (task_classes[idx][k] - 1).int()
+            heatmap_list = []
+            mask_list = []
+            inds_list = []
 
-                width = task_boxes[idx][k][3]
-                length = task_boxes[idx][k][4]
-                width = width / voxel_size[0] / self.target_cfg.OUT_SIZE_FACTOR
-                length = length / voxel_size[1] / self.target_cfg.OUT_SIZE_FACTOR
+            for idx_partition, partition in enumerate(partitions):
+                for k in range(num_objs):
+                    cls_id = (task_classes[idx][k] - 1).int()
 
-                if width > 0 and length > 0:
-                    radius = gaussian_radius(
-                        (length, width),
-                        min_overlap=self.target_cfg.GAUSSIAN_OVERLAP)
-                    radius = max(self.target_cfg.MIN_RADIUS, int(radius))
+                    width = task_boxes[idx][k][3]
+                    length = task_boxes[idx][k][4]
+                    width = width / voxel_size[0] / self.target_cfg.OUT_SIZE_FACTOR
+                    length = length / voxel_size[1] / self.target_cfg.OUT_SIZE_FACTOR
 
-                    # be really careful for the coordinate system of
-                    # your box annotation.
-                    x, y, z = task_boxes[idx][k][0], task_boxes[idx][k][
-                        1], task_boxes[idx][k][2]
+                    if width > 0 and length > 0:
+                        radius = gaussian_radius(
+                            (length, width),
+                            min_overlap=self.target_cfg.GAUSSIAN_OVERLAP)
+                        radius = max(self.target_cfg.MIN_RADIUS, int(radius))
 
-                    coor_x = (
-                        x - pc_range[0]
-                    ) / voxel_size[0] / self.target_cfg.OUT_SIZE_FACTOR
-                    coor_y = (
-                        y - pc_range[1]
-                    ) / voxel_size[1] / self.target_cfg.OUT_SIZE_FACTOR
+                        # be really careful for the coordinate system of
+                        # your box annotation.
+                        x, y, z = task_boxes[idx][k][0], task_boxes[idx][k][
+                            1], task_boxes[idx][k][2]
 
-                    heatmap_list = []
-                    mask_list = []
-                    inds_list = []
+                        coor_x = (
+                            x - pc_range[0]
+                        ) / voxel_size[0] / self.target_cfg.OUT_SIZE_FACTOR
+                        coor_y = (
+                            y - pc_range[1]
+                        ) / voxel_size[1] / self.target_cfg.OUT_SIZE_FACTOR
 
-                    for partition in partitions:
                         center = torch.tensor([coor_x, coor_y],
                                             dtype=torch.float32,
                                             device=device)
@@ -332,7 +299,6 @@ class CounterHeadKittiExp(nn.Module):
                         # area when creating the heatmap
                         if not (partition[0] <= center_int[0] <= partition[1] and partition[2] <= center_int[1] <= partition[3]):
                             continue
-
                         draw_gaussian(heatmap[cls_id], center_int, radius)
 
                         new_idx = k
@@ -353,22 +319,24 @@ class CounterHeadKittiExp(nn.Module):
                             torch.cos(rot).unsqueeze(0),
                         ])
 
-                        mask_list.append(mask) 
-                        inds_list.append(inds)
-
-                        heatmap_list.append(heatmap)
+                mask_list.append(mask)
+                inds_list.append(inds)
+                heatmap_list.append(heatmap)
 
                 heatmap = gt_bboxes_3d.new_zeros(
                 (len(self.class_names[idx]), feature_map_size[1],
-                 feature_map_size[0]))
+                feature_map_size[0]))
                 ind = gt_labels_3d.new_zeros((max_objs), dtype=torch.int64)
                 mask = gt_bboxes_3d.new_zeros((max_objs), dtype=torch.uint8)
-                
+
+            # print('length of heatmap list: {}'.format(len(heatmap_list)))
+
 
             heatmaps.append(heatmap_list)
             anno_boxes.append(anno_box)
             masks.append(mask_list)
             inds.append(ind)
+
         return heatmaps, anno_boxes, inds, masks
 
     def generate_predicted_boxes(self, batch_size, cls_preds, box_preds, dir_cls_preds=None):
@@ -431,7 +399,7 @@ class CounterHeadKittiExp(nn.Module):
     def sigmoid(self, x):
         y = torch.clamp(x.sigmoid(), min=1e-4, max=1 - 1e-4)
         return y
-    
+
     def extract_centers(self, heatmap, threshold=0.5, radius=2):
         """
         Extract centers from the heatmap.
@@ -466,7 +434,7 @@ class CounterHeadKittiExp(nn.Module):
 
                 for i in range(len(y_idx)):
                     batch_centers.append((x_idx[i].item(), y_idx[i].item()))
-            
+
             all_centers.append(batch_centers)
 
         # Convert list of centers to tensor
@@ -476,68 +444,76 @@ class CounterHeadKittiExp(nn.Module):
         for i, centers in enumerate(centers_tensor):
             if len(centers) > 0:
                 padded_centers[i, :len(centers), :] = centers
-        
+
         num_centers = torch.tensor([len(centers) for centers in all_centers], dtype=torch.float32, device=device)
-        
+
         return num_centers, padded_centers
-    
+
     def get_counter_loss(self):
-        # pred_dicts = self.forward_ret_dict['pred_dicts']
-        # target_dicts = self.forward_ret_dict['target_dicts']
-        for heatmap in self.forward_ret_dict['cls_preds']:
-            heatmaps = heatmap.permute(0, 3, 1, 2) 
-            masks = self.forward_ret_dict['masks']
-            # print('aaaaaaaaaaaa')
-            # print(masks[0].shape)
+        gt_heatmaps = self.process_nested_list(self.forward_ret_dict['heatmaps']).squeeze()
+        loss_all = torch.zeros(1, dtype=torch.float64).to('cuda')
+
+        for idx, heatmap in enumerate(self.forward_ret_dict['cls_preds']):
+            # print('heatmap shape')
+            # print(heatmap.shape)
+            # heatmaps = heatmap.permute(0, 3, 1, 2)
+            par = self.ranges[idx]
+            pred_heatmaps = self.sigmoid(heatmap)
 
             tb_dict = {}
             loss = 0
 
-            center_count, centers = self.extract_centers(heatmaps, threshold=0.5)
+            # print(pred_heatmaps)
+
+            center_count, centers = self.extract_centers(pred_heatmaps, threshold=0.51)
             center_count = torch.sum(center_count)
-            gt_count = torch.sum(torch.stack(masks)).to('cuda')
+            # gt_count = torch.sum(torch.stack(masks)).to('cuda')
+
+
+            gt_count = gt_heatmaps[:, idx, :, :, :].eq(1).float().sum().item()
+            # print('gt count: {}'.format(gt_count))
+            # print('center count: {}'.format(center_count))
 
             count_loss = torch.abs(gt_count - center_count)
+            loss_all = loss_all + count_loss
+        return loss_all #, tb_dict
 
-        # for idx, heatmap in enumerate(heatmaps):
-        #     hm = heatmap
+    def process_nested_list(self, nested_list):
+        # Base case: if the current list contains tensors
+        if all(isinstance(item, torch.Tensor) for item in nested_list):
+            return torch.stack(nested_list)  # Stack the tensors at this level
 
-        #     center_count, centers = self.extract_centers(hm, threshold=0.5)
-        #     center_count = torch.sum(center_count)
-            
-        #     gt_count = torch.sum(masks[idx]).to('cuda')
-
-        #     count_loss = torch.abs(gt_count - center_count) #torch.sigmoid()
-
-        #     # hm_loss = self.hm_loss_func(pred_dict['hm'], target_dicts['heatmaps'][idx])
-        #     # hm_loss *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['cls_weight']
-
-        #     # loss += hm_loss + count_loss
-        #     # tb_dict['rpn_loss_cls'] += count_loss.item()
-        return count_loss #, tb_dict
+        # Recursive case: if the current list contains further nested lists
+        return torch.stack([self.process_nested_list(sublist) for sublist in nested_list if sublist])  # Recurse and stack
 
     def get_cls_layer_loss(self):
-        # NHWC -> NCHW 
+        # NHWC -> NCHW
         loss_all = torch.zeros(1, dtype=torch.float64).to('cuda')
+        gt_heatmaps = self.forward_ret_dict['heatmaps']
+        gt_heatmaps = self.process_nested_list(gt_heatmaps)
+
         for idx, heatmap in enumerate(self.forward_ret_dict['cls_preds']):
             # pred_heatmaps = clip_sigmoid(self.forward_ret_dict['cls_preds']).permute(0, 3, 1, 2)
-            par = self.ranges[idx] 
+            par = self.ranges[idx]
             pred_heatmaps = clip_sigmoid(heatmap)#.permute(0, 3, 1, 2)
-            # print('aaaaaaaaaaaaaaaaaaa') 
-            # print(self.forward_ret_dict['heatmaps'][0].shape)
-            gt_heatmaps =  self.forward_ret_dict['heatmaps'][0][:,:, par[0]:par[1], par[2]:par[3]]
+
+            gt_heatmaps_partition = gt_heatmaps[:, :, idx, :, :, :].squeeze(1)
+
+            gt_heatmaps_partition =  gt_heatmaps_partition[:,:, par[0]:par[1], par[2]:par[3]]
             # print('pred: {}'.format(pred_heatmaps.shape))
-            # print('gt: {}'.format(gt_heatmaps.shape))
-            num_pos = gt_heatmaps.eq(1).float().sum().item()
+            # print('gt: {}'.format(gt_heatmaps_partition.shape))
+            num_pos = gt_heatmaps_partition.eq(1).float().sum().item()
+
+            # print('num_pos: {}'.format(num_pos))
 
             cls_loss = self.loss_cls(
                     pred_heatmaps,
-                    gt_heatmaps,
+                    gt_heatmaps_partition,
                     avg_factor=max(num_pos, 1))
 
             cls_loss = cls_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['cls_weight']
             loss_all += cls_loss
-        
+
         tb_dict = {
             'rpn_loss_cls': loss_all.item()
         }
@@ -550,7 +526,7 @@ class CounterHeadKittiExp(nn.Module):
 
         ind = inds
         num = masks.float().sum()
-        pred = self.forward_ret_dict['box_preds'] # N x (HxW) x 7 
+        pred = self.forward_ret_dict['box_preds'] # N x (HxW) x 7
         pred = pred.view(pred.size(0), -1, pred.size(3))
         pred = self._gather_feat(pred, ind)
         mask = masks.unsqueeze(2).expand_as(target_box).float()
@@ -559,7 +535,7 @@ class CounterHeadKittiExp(nn.Module):
 
         code_weights = self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['code_weights']
         bbox_weights = mask * mask.new_tensor(code_weights)
-        
+
         loc_loss = l1_loss(
             pred, target_box, bbox_weights, avg_factor=(num + 1e-4))
 
@@ -676,7 +652,7 @@ def gaussian_radius(det_size, min_overlap=0.5):
 
 
 """
-Gaussian Loss 
+Gaussian Loss
 """
 class GaussianFocalLoss(nn.Module):
     """GaussianFocalLoss is a variant of focal loss.

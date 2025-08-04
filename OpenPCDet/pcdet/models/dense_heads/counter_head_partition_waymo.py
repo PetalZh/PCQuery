@@ -50,7 +50,7 @@ class SeparateHead(nn.Module):
 
         return ret_dict
 
-class CounterHeadPartitionOverlap(nn.Module):
+class CounterHeadPartition(nn.Module):
     def __init__(self, model_cfg, input_channels, num_class, class_names, grid_size, point_cloud_range, voxel_size,
                  predict_boxes_when_training=True):
         super().__init__()
@@ -168,20 +168,16 @@ class CounterHeadPartitionOverlap(nn.Module):
                 mask[k] = 1
 
             mask_list.append(mask)
-            inds_list.append(inds)
-
-            heatmap_list.append(heatmap)
             mask = gt_boxes.new_zeros(num_max_objs).long()
-            heatmap = gt_boxes.new_zeros(num_classes, feature_map_size[1], feature_map_size[0])
+            inds_list.append(inds)
+            heatmap_list.append(heatmap)
 
         mask_list = torch.stack(mask_list)
         inds_list = torch.stack(inds_list)
         heatmap_list = torch.stack(heatmap_list)
 
         # print('heatmap list: ')
-        # for item in heatmap_list:
-        #     print(len(item))
-        # print(heatmap_list[0])
+        # print(heatmap_list.shape)
 
         return heatmap_list, ret_boxes, inds_list, mask_list, ret_boxes_src
 
@@ -252,6 +248,12 @@ class CounterHeadPartitionOverlap(nn.Module):
             ret_dict['inds'].append(torch.stack(inds_list, dim=0))
             ret_dict['masks'].append(torch.stack(masks_list, dim=0))
             ret_dict['target_boxes_src'].append(torch.stack(target_boxes_src_list, dim=0))
+
+        # print(len(ret_dict['target_boxes']))
+        # print('heatmap')
+        # print(ret_dict['heatmaps'][0].shape)
+        # print(ret_dict['target_boxes'][0].shape)
+        # print(ret_dict['masks'][0].shape)
         return ret_dict
 
     def sigmoid(self, x):
@@ -284,6 +286,8 @@ class CounterHeadPartitionOverlap(nn.Module):
                 total_obj.append(torch.sum(target_dicts['masks'][idx][i, :, :]).to('cuda'))
 
             for i in range(len(partitions)):
+                # pred_dict[i]['hm']
+                # print('partition {}'.format(i))
                 hm = self.sigmoid(pred_dict[i]['hm'])
                 par = partitions[i]
 
@@ -299,6 +303,7 @@ class CounterHeadPartitionOverlap(nn.Module):
                 hm_loss *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['cls_weight']
                 head_hm_loss += hm_loss
 
+            # print(count_loss_l1)
             head_count_loss = torch.sum(weight * count_loss_l1)
 
             loss += head_hm_loss + head_count_loss
@@ -429,22 +434,28 @@ class CounterHeadPartitionOverlap(nn.Module):
     def forward(self, data_dict):
         spatial_features_2d = data_dict['spatial_features_2d']
         x = self.shared_conv(spatial_features_2d)
+        # print(x.shape)
 
-        expanding_rate = 0.2
-        # expanding = math.floor(64 * expanding_rate)
-        expanding = math.floor(94 * expanding_rate)
-
-
-        # x_start, x_end, y_start, y_end
         # for nuscenes
-        ranges = [[0, 64+expanding, 0, 64+expanding],[0, 64+expanding, 64-expanding, 128],[64-expanding, 128, 0, 64+expanding],[64-expanding, 128, 64-expanding, 128]]
+        x1 = x[:, :, :64, :64]
+        x2 = x[:, :, :64, 64:128]
+        x3 = x[:, :, 64:128, :64]
+        x4 = x[:, :, 64:128, 64:128]
+
+        # # x_start, x_end, y_start, y_end
+        ranges = [[0, 64, 0, 64],[0, 64, 64, 128],[64, 128, 0, 64],[64, 128, 64, 128]]
+
+        # for waymo
+        x1 = x[:, :, :94, :94]
+        x2 = x[:, :, :94, 94:188]
+        x3 = x[:, :, 94:188, :94]
+        x4 = x[:, :, 94:188, 94:188]
 
         pred_dicts = []
-        # # print(self.heads_list)
+
+
         for head in self.heads_list:
-            head_output= []
-            for coor_range in ranges:
-                head_output.append(head(x[:, :, coor_range[0]:coor_range[1], coor_range[2]:coor_range[3]]))
+            head_output= [head(x1), head(x2), head(x3), head(x4)]
             pred_dicts.append(head_output)
 
         if self.training:
@@ -465,7 +476,8 @@ class CounterHeadPartitionOverlap(nn.Module):
                 feature_map_stride=data_dict.get('spatial_features_2d_strides', None)
             )
 
-            objects = ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+            # waymo
+            objects = ['Vehicle', 'Pedestrian', 'Cyclist']
 
             for idx, pred_dict in enumerate(pred_dicts):
                 # pred_dict['hm'] #self.sigmoid(pred_dict['hm'])
@@ -496,7 +508,6 @@ class CounterHeadPartitionOverlap(nn.Module):
                 file = 'path_to_save/{}.txt'.format(self.progress)
                 with open(file, 'w') as f:
                     json.dump(hm_list, f)
-
 
                 self.progress += 1
 

@@ -2,9 +2,10 @@ import torch
 import numpy as np
 import torch.nn as nn
 from ...utils import box_coder_utils, common_utils, loss_utils
-
+from ...constants import result, gt_list
 from functools import partial
 from six.moves import map, zip
+import pickle
 import json
 
 
@@ -63,9 +64,25 @@ class CounterHeadKitti(nn.Module):
         nn.init.constant_(self.conv_cls.bias, -np.log((1 - pi) / pi))
         nn.init.normal_(self.conv_box.weight, mean=0, std=0.001)
 
+    def process_nested_list(self, nested_list):
+        # Base case: if the current list contains tensors
+        if all(isinstance(item, torch.Tensor) for item in nested_list):
+            return torch.stack(nested_list)  # Stack the tensors at this level
+
+        # Recursive case: if the current list contains further nested lists
+        return torch.stack([self.process_nested_list(sublist) for sublist in nested_list if sublist])  # Recurse and stack
+    
     def forward(self, data_dict):
         spatial_features_2d = data_dict['spatial_features_2d']
         # print('spatial feature 2d: {}'.format(spatial_features_2d.shape))
+
+        output_tensor = F.max_pool2d(spatial_features_2d, kernel_size=(128, 128))
+        # # The shape of output_tensor will be [4, 512, 1, 1], so we can remove the last two dimensions by squeezing
+        output_tensor = output_tensor.squeeze(-1).squeeze(-1) 
+
+        # file = '/data/feature_kitti/{}.txt'.format(self.progress)
+        # with open(file, 'wb') as f: 
+        #     pickle.dump(output_tensor, f)
 
         cls_preds = self.conv_cls(spatial_features_2d)
         box_preds = self.conv_box(spatial_features_2d)
@@ -83,27 +100,49 @@ class CounterHeadKitti(nn.Module):
             self.forward_ret_dict.update(targets_dict)
 
         if not self.training or self.predict_boxes_when_training:
-            hm_list = []
+            # hm_list = []
             pred_dicts = self.forward_ret_dict['cls_preds']
-
+            # print('pred dicts: ')
             # print(pred_dicts.shape)
-            for i in range(pred_dicts.shape[-1]):
-                batch_hm = pred_dicts[..., i]
-                # print(batch_hm.shape)
-                hm_list.append(batch_hm.tolist())
 
-            file = '/data/kitti_hm/{}.txt'.format(self.progress)
-            with open(file, 'w') as f: 
-                json.dump(hm_list, f)
-            self.progress += 1
+            targets_dict = self.assign_targets(
+                gt_boxes=data_dict['gt_boxes']
+            )
+            gt_heatmaps = self.process_nested_list(targets_dict ['heatmaps']).squeeze()
+            # print('gt heatmaps shape: ')
+            # print(gt_heatmaps.shape)
+            
+
+            for i in range(pred_dicts.size(-1)):
+                pred_heatmap = pred_dicts[:, :, :, i]
+                # print('pred heatmap shape: ')
+                # print(pred_heatmap)
+
+                batch_gt_count = []
+                for j in range(gt_heatmaps[:, i, :, :].size(0)):
+                    gt_count = gt_heatmaps[j, i, :, :].eq(1).float().sum().item()
+                    batch_gt_count.append(gt_count)
+                
+                # hm_list.append(pred_heatmap.tolist())
+                gt_list.append(batch_gt_count)
+
+                # file = '/data/kitti_hm4/{}.txt'.format(self.progress)
+                # with open(file, 'w') as f: 
+                #     json.dump(pred_heatmap.tolist(), f)
+                self.progress += 1
+
+
+            # gt_file = '/data/kitti_gt_list3.txt'
+            # with open(gt_file, 'w') as f: 
+            #     json.dump(gt_list, f)
+            
 
             
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
                 batch_size=data_dict['batch_size'],
                 cls_preds=cls_preds, box_preds=box_preds, dir_cls_preds=None
             )
-
-            
+    
             data_dict['batch_cls_preds'] = batch_cls_preds
             data_dict['batch_box_preds'] = batch_box_preds
             data_dict['cls_preds_normalized'] = False
@@ -392,6 +431,46 @@ class CounterHeadKitti(nn.Module):
         y = torch.clamp(x.sigmoid(), min=1e-4, max=1 - 1e-4)
         return y
     
+    def extract_centers2(self, heatmap, threshold=0.5, radius=2):
+        device = heatmap.device
+        batch, c, h, w = heatmap.shape
+        all_centers = []
+
+        for b in range(batch):
+            batch_centers = []
+            for ch in range(c):
+                heatmap_bch = heatmap[b, ch, :, :]
+
+                # print(heatmap_bch.shape)
+
+                # Apply threshold to the heatmap
+                keep = heatmap_bch > threshold
+                heatmap_bch = heatmap_bch * keep.float()
+
+                # Suppress non-local maxima
+                heatmap_max = F.max_pool2d(heatmap_bch.unsqueeze(0).unsqueeze(0), (2 * radius + 1, 2 * radius + 1), stride=1, padding=radius)
+                keep = (heatmap_bch == heatmap_max.squeeze(0).squeeze(0))
+                heatmap_bch = heatmap_bch * keep.float()
+
+                # Get indices of the center points
+                y_idx, x_idx = torch.nonzero(heatmap_bch, as_tuple=True)
+
+                for i in range(len(y_idx)):
+                    batch_centers.append((x_idx[i].item(), y_idx[i].item()))
+            
+            all_centers.append(batch_centers)
+
+        # Convert list of centers to tensor
+        centers_tensor = [torch.tensor(centers, dtype=torch.float32, device=device) for centers in all_centers]
+        max_len = max(len(centers) for centers in centers_tensor)
+        padded_centers = torch.zeros(batch, max_len, 2, device=device)
+        for i, centers in enumerate(centers_tensor):
+            if len(centers) > 0:
+                padded_centers[i, :len(centers), :] = centers
+        
+        num_centers = torch.tensor([len(centers) for centers in all_centers], dtype=torch.float32, device=device)        
+        return num_centers, padded_centers
+    
     def extract_centers(self, heatmap, threshold=0.5, radius=2):
         """
         Extract centers from the heatmap.
@@ -444,35 +523,25 @@ class CounterHeadKitti(nn.Module):
     def get_counter_loss(self):
         # pred_dicts = self.forward_ret_dict['pred_dicts']
         # target_dicts = self.forward_ret_dict['target_dicts']
+
+        # heatmaps = self.sigmoid(self.forward_ret_dict['cls_preds']).permute(0, 3, 1, 2) 
         heatmaps = self.forward_ret_dict['cls_preds'].permute(0, 3, 1, 2) 
         masks = self.forward_ret_dict['masks']
 
-        tb_dict = {}
-        loss = 0
-
-        center_count, centers = self.extract_centers(heatmaps, threshold=0.5)
+        center_count, centers = self.extract_centers2(heatmaps, threshold=0.5, radius=5)
+        # print(heatmaps.shape)
+        # print('center_count: {}'.format(center_count))
+        # print(masks[0])
         center_count = torch.sum(center_count)
         gt_count = torch.sum(torch.stack(masks)).to('cuda')
 
+        # print('center_count: {}'.format(center_count))
+        # print('gt_count: {}'.format(gt_count))
+
         count_loss = torch.abs(gt_count - center_count)
 
-        # for idx, heatmap in enumerate(heatmaps):
-        #     hm = heatmap
-
-        #     center_count, centers = self.extract_centers(hm, threshold=0.5)
-        #     center_count = torch.sum(center_count)
-            
-        #     gt_count = torch.sum(masks[idx]).to('cuda')
-
-        #     count_loss = torch.abs(gt_count - center_count) #torch.sigmoid()
-
-        #     # hm_loss = self.hm_loss_func(pred_dict['hm'], target_dicts['heatmaps'][idx])
-        #     # hm_loss *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['cls_weight']
-
-        #     # loss += hm_loss + count_loss
-        #     # tb_dict['rpn_loss_cls'] += count_loss.item()
-        return count_loss #, tb_dict
-
+        return count_loss
+    
     def get_cls_layer_loss(self):
         # NHWC -> NCHW 
         pred_heatmaps = clip_sigmoid(self.forward_ret_dict['cls_preds']).permute(0, 3, 1, 2) 

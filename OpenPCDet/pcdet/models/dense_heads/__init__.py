@@ -15,6 +15,14 @@ from .counter_head_partition_exp import CounterHeadPartitionExp
 from .center_head_kitti import CenterHeadKitti
 from .counter_head_kitti import CounterHeadKitti
 from .kitti_counter_head_partition_exp import CounterHeadKittiExp
+from .kitti_counter_head_partition_exp import CounterHeadKittiExp
+from .counter_head_partition_waymo import CounterHeadPartitionWaymo
+from .counter_head_partition_overlap_waymo import CounterHeadPartitionOverlapWaymo
+
+from .bev_segmentation_head import BEVSegmentationHead
+from .sparse_center_head import SparseCenterHead
+from .sparse_transfusion_head import SparseTransFusionHead
+
 __all__ = {
     'AnchorHeadTemplate': AnchorHeadTemplate,
     'AnchorHeadSingle': AnchorHeadSingle,
@@ -32,5 +40,10 @@ __all__ = {
     'CounterHeadPartitionExp': CounterHeadPartitionExp,
     'CenterHeadKitti': CenterHeadKitti,
     'CounterHeadKitti': CounterHeadKitti,
-    'CounterHeadKittiExp': CounterHeadKittiExp
+    'CounterHeadKittiExp': CounterHeadKittiExp,
+    'CounterHeadPartitionWaymo': CounterHeadPartitionWaymo,
+    'CounterHeadPartitionOverlapWaymo': CounterHeadPartitionOverlap,
+    'BEVSegmentationHead': BEVSegmentationHead,
+    'SparseCenterHead': SparseCenterHead,
+    'SparseTransFusionHead': SparseTransFusionHead,
 }

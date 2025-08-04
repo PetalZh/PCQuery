@@ -239,11 +239,6 @@ class CounterHead(nn.Module):
             ret_dict['masks'].append(torch.stack(masks_list, dim=0))
             ret_dict['target_boxes_src'].append(torch.stack(target_boxes_src_list, dim=0))
 
-        # print(len(ret_dict['target_boxes']))
-        # print('heatmap')
-        # print(ret_dict['heatmaps'][0].shape)
-        # print(ret_dict['target_boxes'][0].shape)
-        # print(ret_dict['masks'][0].shape)
         return ret_dict
 
     def sigmoid(self, x):
@@ -263,92 +258,23 @@ class CounterHead(nn.Module):
         for idx, pred_dict in enumerate(pred_dicts):
 
             pred_dict['hm'] = self.sigmoid(pred_dict['hm'])
-            
+
             hm = pred_dict['hm']
-            # print('hm tensor: ')
-            # print('hm: ')
-            # print(hm.shape)
-            # print('mask: ')
-            # print(target_dicts['masks'][idx].shape)
 
             center_count, centers = self.extract_centers(hm, threshold=0.5)
             center_count = torch.sum(center_count)
-            
-            gt_count = torch.sum(target_dicts['masks'][idx]).to('cuda')
-            # print(target_dicts['masks'][idx].shape)
 
-            # print('gt_count')
-            # print(gt_count)
-            # print('center_count')
-            # print(center_count)
+            gt_count = torch.sum(target_dicts['masks'][idx]).to('cuda')
 
             count_loss = torch.abs(gt_count - center_count) #torch.sigmoid()
 
             hm_loss = self.hm_loss_func(pred_dict['hm'], target_dicts['heatmaps'][idx])
             hm_loss *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['cls_weight']
-
-            # print('loss')
-            # print(hm_loss)
-            # print(count_loss)
-
-            # target_boxes = target_dicts['target_boxes'][idx]
-            # pred_boxes = torch.cat([pred_dict[head_name] for head_name in self.separate_head_cfg.HEAD_ORDER], dim=1)
-
-            # print('shape of target box: ')
-            # print(target_boxes.shape)
-            # print('shape of pred box: ')
-            # print(pred_boxes.shape)
-
-            # reg_loss = self.reg_loss_func(
-            #     pred_boxes, target_dicts['masks'][idx], target_dicts['inds'][idx], target_boxes
-            # )
-            # loc_loss = (reg_loss * reg_loss.new_tensor(self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['code_weights'])).sum()
-            # loc_loss = loc_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['loc_weight']
-
-            # loss += hm_loss + loc_loss
             loss += hm_loss + count_loss
             tb_dict['hm_loss_head_%d' % idx] = hm_loss.item() + count_loss.item()
-            # tb_dict['loc_loss_head_%d' % idx] = loc_loss.item()
 
-            # if 'iou' in pred_dict or self.model_cfg.get('IOU_REG_LOSS', False):
-
-            #     batch_box_preds = centernet_utils.decode_bbox_from_pred_dicts(
-            #         pred_dict=pred_dict,
-            #         point_cloud_range=self.point_cloud_range, voxel_size=self.voxel_size,
-            #         feature_map_stride=self.feature_map_stride
-            #     )  # (B, H, W, 7 or 9)
-
-            #     if 'iou' in pred_dict:
-            #         batch_box_preds_for_iou = batch_box_preds.permute(0, 3, 1, 2)  # (B, 7 or 9, H, W)
-
-            #         iou_loss = loss_utils.calculate_iou_loss_centerhead(
-            #             iou_preds=pred_dict['iou'],
-            #             batch_box_preds=batch_box_preds_for_iou.clone().detach(),
-            #             mask=target_dicts['masks'][idx],
-            #             ind=target_dicts['inds'][idx], gt_boxes=target_dicts['target_boxes_src'][idx]
-            #         )
-            #         loss += iou_loss
-            #         tb_dict['iou_loss_head_%d' % idx] = iou_loss.item()
-
-            #     if self.model_cfg.get('IOU_REG_LOSS', False):
-            #         iou_reg_loss = loss_utils.calculate_iou_reg_loss_centerhead(
-            #             batch_box_preds=batch_box_preds_for_iou,
-            #             mask=target_dicts['masks'][idx],
-            #             ind=target_dicts['inds'][idx], gt_boxes=target_dicts['target_boxes_src'][idx]
-            #         )
-            #         if target_dicts['masks'][idx].sum().item() != 0:
-            #             iou_reg_loss = iou_reg_loss * self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['loc_weight']
-            #             loss += iou_reg_loss
-            #             tb_dict['iou_reg_loss_head_%d' % idx] = iou_reg_loss.item()
-            #         else:
-            #             loss += (batch_box_preds_for_iou * 0.).sum()
-            #             tb_dict['iou_reg_loss_head_%d' % idx] = (batch_box_preds_for_iou * 0.).sum()
-
-
-
-        # tb_dict['rpn_loss'] = loss.item()
         return loss, tb_dict
-    
+
     def extract_centers(self, heatmap, threshold=0.5, radius=2):
         """
         Extract centers from the heatmap.
@@ -383,7 +309,7 @@ class CounterHead(nn.Module):
 
                 for i in range(len(y_idx)):
                     batch_centers.append((x_idx[i].item(), y_idx[i].item()))
-            
+
             all_centers.append(batch_centers)
 
         # Convert list of centers to tensor
@@ -393,11 +319,11 @@ class CounterHead(nn.Module):
         for i, centers in enumerate(centers_tensor):
             if len(centers) > 0:
                 padded_centers[i, :len(centers), :] = centers
-        
+
         num_centers = torch.tensor([len(centers) for centers in all_centers], dtype=torch.float32, device=device)
-        
+
         return num_centers, padded_centers
-    
+
     def generate_predicted_boxes(self, batch_size, pred_dicts):
         post_process_cfg = self.model_cfg.POST_PROCESSING
         post_center_limit_range = torch.tensor(post_process_cfg.POST_CENTER_LIMIT_RANGE).cuda().float()
@@ -411,23 +337,6 @@ class CounterHead(nn.Module):
             batch_hm = pred_dict['hm'].sigmoid()
             batch_center = pred_dict['center']
             batch_center_z = pred_dict['center_z']
-            # batch_dim = pred_dict['dim'].exp()
-            # batch_rot_cos = pred_dict['rot'][:, 0].unsqueeze(dim=1)
-            # batch_rot_sin = pred_dict['rot'][:, 1].unsqueeze(dim=1)
-            # batch_vel = pred_dict['vel'] if 'vel' in self.separate_head_cfg.HEAD_ORDER else None
-
-            # batch_iou = (pred_dict['iou'] + 1) * 0.5 if 'iou' in pred_dict else None
-
-            # final_pred_dicts = centernet_utils.decode_bbox_from_heatmap(
-            #     heatmap=batch_hm, rot_cos=batch_rot_cos, rot_sin=batch_rot_sin,
-            #     center=batch_center, center_z=batch_center_z, dim=batch_dim, vel=batch_vel, iou=batch_iou,
-            #     point_cloud_range=self.point_cloud_range, voxel_size=self.voxel_size,
-            #     feature_map_stride=self.feature_map_stride,
-            #     K=post_process_cfg.MAX_OBJ_PER_SAMPLE,
-            #     circle_nms=(post_process_cfg.NMS_CONFIG.NMS_TYPE == 'circle_nms'),
-            #     score_thresh=post_process_cfg.SCORE_THRESH,
-            #     post_center_limit_range=post_center_limit_range
-            # )
 
             for k, final_dict in enumerate(final_pred_dicts):
                 final_dict['pred_labels'] = self.class_id_mapping_each_head[idx][final_dict['pred_labels'].long()]
@@ -488,21 +397,13 @@ class CounterHead(nn.Module):
 
     def forward(self, data_dict):
         spatial_features_2d = data_dict['spatial_features_2d']
-        # print(data_dict.keys())
-        # print(spatial_features_2d.shape)
-        
+
         x = self.shared_conv(spatial_features_2d)
         # print(x.shape)
 
 
         output_tensor = F.max_pool2d(x, kernel_size=(128, 128))
-        # The shape of output_tensor will be [4, 512, 1, 1], so we can remove the last two dimensions by squeezing
-        output_tensor = output_tensor.squeeze(-1).squeeze(-1) 
-
-        file = '/data/feature_nus/{}.txt'.format(self.progress)
-        with open(file, 'wb') as f: 
-            pickle.dump(output_tensor, f)
-  
+        output_tensor = output_tensor.squeeze(-1).squeeze(-1)
 
         pred_dicts = []
         # print(self.heads_list)
@@ -529,7 +430,7 @@ class CounterHead(nn.Module):
 
             for idx, pred_dict in enumerate(pred_dicts):
                 pred_dict['hm'] = self.sigmoid(pred_dict['hm'])
-                
+
                 hm = pred_dict['hm']
                 center_count, centers = self.extract_centers(hm, threshold=0.6)
                 center_count = torch.sum(center_count)
@@ -540,12 +441,6 @@ class CounterHead(nn.Module):
                 gt_list.append(batch_gt_count.flatten().tolist())
 
                 gt_count = torch.sum(target_dicts['masks'][idx]).to('cuda')
-
-
-                count_loss = torch.abs(gt_count - center_count) #torch.sigmoid()
-
-                # print('gt count: {}, center count: {}'.format(gt_count, center_count))
-                # print(count_loss)
 
                 obj = objects[idx]
                 data_dict['gt_count'] = gt_count
@@ -559,23 +454,11 @@ class CounterHead(nn.Module):
                 else:
                     result[obj] = {'gt_count': [gt_count.item()], 'center_count': [center_count.item()]}
 
-                # file = '/data/hms_pretrain_ep1/{}.txt'.format(self.progress)
-                # with open(file, 'w') as f: 
-                #     json.dump(pred_dict['hm'].tolist(), f)
+                # save file to path
+                file = 'save_file_to_path'.format(self.progress)
+                with open(file, 'w') as f:
+                    json.dump(pred_dict['hm'].tolist(), f)
 
                 self.progress += 1
-
-            # pred_dicts = self.generate_predicted_boxes(
-            #     data_dict['batch_size'], pred_dicts
-            # )
-
-            # if self.predict_boxes_when_training:
-            #     rois, roi_scores, roi_labels = self.reorder_rois_for_refining(data_dict['batch_size'], pred_dicts)
-            #     data_dict['rois'] = rois
-            #     data_dict['roi_scores'] = roi_scores
-            #     data_dict['roi_labels'] = roi_labels
-            #     data_dict['has_class_labels'] = True
-            # else:
-            #     data_dict['final_box_dicts'] = pred_dicts
 
         return data_dict
